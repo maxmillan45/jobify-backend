@@ -101,5 +101,18 @@ userSchema.pre('save', async function (next) {
 userSchema.methods.matchPassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
+// backend/models/User.js (add googleId field)
+const userSchema = new mongoose.Schema({
+  // ... existing fields
+  googleId: {
+    type: String,
+    sparse: true,
+  },
+  isVerified: {
+    type: Boolean,
+    default: false,
+  },
+  // ... rest of the schema
+});
 
 module.exports = mongoose.model('User', userSchema);

@@ -1,6 +1,7 @@
-// backend/routes/auth.js
+// backend/routes/auth.js (add Google routes)
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const passport = require('passport');
 const User = require('../models/User');
 const { protect } = require('../middleware/auth');
 
@@ -13,68 +14,45 @@ const generateToken = (id) => {
   });
 };
 
-// @route   POST /api/auth/register
-// @desc    Register user
-router.post('/register', async (req, res) => {
-  try {
-    const { name, email, password, role } = req.body;
+// ... existing register and login routes
 
-    // Check if user exists
-    const userExists = await User.findOne({ email });
-    if (userExists) {
-      return res.status(400).json({ message: 'User already exists' });
+// Google OAuth routes
+router.get('/google',
+  passport.authenticate('google', { scope: ['profile', 'email'] })
+);
+
+router.get('/google/callback',
+  passport.authenticate('google', { failureRedirect: '/login', session: false }),
+  (req, res) => {
+    try {
+      // Generate JWT token
+      const token = generateToken(req.user._id);
+      
+      // Redirect to frontend with token
+      res.redirect(`${process.env.FRONTEND_URL}/auth/google/callback?token=${token}`);
+    } catch (error) {
+      console.error('Google auth error:', error);
+      res.redirect(`${process.env.FRONTEND_URL}/login?error=google_auth_failed`);
     }
-
-    // Create user
-    const user = await User.create({
-      name,
-      email,
-      password,
-      role: role || 'jobseeker',
-    });
-
-    // Create token
-    const token = generateToken(user._id);
-
-    res.status(201).json({
-      success: true,
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error', error: error.message });
   }
-});
+);
 
-// @route   POST /api/auth/login
-// @desc    Login user
-router.post('/login', async (req, res) => {
+// Verify Google token
+router.post('/google/verify', async (req, res) => {
   try {
-    const { email, password } = req.body;
-
-    // Check for user email
-    const user = await User.findOne({ email }).select('+password');
-
+    const { token } = req.body;
+    
+    if (!token) {
+      return res.status(400).json({ message: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id);
+    
     if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return res.status(401).json({ message: 'User not found' });
     }
-
-    // Check password
-    const isMatch = await user.matchPassword(password);
-
-    if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-
-    // Create token
-    const token = generateToken(user._id);
-
+    
     res.json({
       success: true,
       token,
@@ -83,21 +61,13 @@ router.post('/login', async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        avatar: user.avatar,
       },
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error('Token verification error:', error);
+    res.status(401).json({ message: 'Invalid token' });
   }
-});
-
-// @route   GET /api/auth/me
-// @desc    Get current logged in user
-router.get('/me', protect, async (req, res) => {
-  res.json({
-    success: true,
-    user: req.user,
-  });
 });
 
 module.exports = router;
