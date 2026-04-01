@@ -1,4 +1,3 @@
-// backend/server.js
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -26,7 +25,7 @@ app.use(session({
 
 // Configure CORS
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
+  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:5000'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -323,9 +322,11 @@ passport.use(
           email: profile.emails[0].value,
           googleId: profile.id,
           avatar: profile.photos[0]?.value,
-          role: 'jobseeker',
+          role: 'job_seeker',
+          userType: 'job_seeker',
           isVerified: true,
-          createdAt: new Date()
+          createdAt: new Date(),
+          savedJobs: []
         };
         
         users.push(newUser);
@@ -354,15 +355,22 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
     
+    console.log('Registration attempt:', { name, email, role });
+    
     // Check if user exists
     const userExists = users.find(u => u.email === email);
     if (userExists) {
-      return res.status(400).json({ message: 'User already exists' });
+      return res.status(400).json({ 
+        success: false,
+        message: 'User already exists' 
+      });
     }
     
     // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
+    
+    console.log('Password hashed successfully');
     
     // Create user
     const user = {
@@ -370,12 +378,15 @@ app.post('/api/auth/register', async (req, res) => {
       name,
       email,
       password: hashedPassword,
-      role: role || 'jobseeker',
-      isVerified: false,
-      createdAt: new Date()
+      role: role || 'job_seeker',
+      userType: role || 'job_seeker',
+      isVerified: true,
+      createdAt: new Date(),
+      savedJobs: []
     };
     
     users.push(user);
+    console.log('User created:', { id: user.id, email: user.email, role: user.role });
     
     // Generate token
     const token = generateToken(user.id);
@@ -387,12 +398,17 @@ app.post('/api/auth/register', async (req, res) => {
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role
+        role: user.role,
+        userType: user.role
       }
     });
   } catch (error) {
     console.error('Register error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -401,17 +417,40 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
+    console.log('Login attempt for email:', email);
+    
     // Find user
     const user = users.find(u => u.email === email);
     if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      console.log('User not found:', email);
+      return res.status(401).json({ 
+        success: false,
+        message: 'Invalid credentials' 
+      });
+    }
+    
+    // Check if user has a password (Google OAuth users won't have one)
+    if (!user.password) {
+      console.log('Google OAuth user attempting email login:', email);
+      return res.status(401).json({ 
+        success: false,
+        message: 'This account uses Google Sign-In. Please use Google to log in.' 
+      });
     }
     
     // Check password
+    console.log('Comparing password for user:', email);
     const isMatch = await bcrypt.compare(password, user.password);
+    
     if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      console.log('Invalid password for user:', email);
+      return res.status(401).json({ 
+        success: false,
+        message: 'Invalid credentials' 
+      });
     }
+    
+    console.log('Login successful for:', email);
     
     // Generate token
     const token = generateToken(user.id);
@@ -423,12 +462,17 @@ app.post('/api/auth/login', async (req, res) => {
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role
+        role: user.role,
+        userType: user.role
       }
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -437,7 +481,10 @@ app.get('/api/auth/me', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -445,7 +492,10 @@ app.get('/api/auth/me', (req, res) => {
     const user = users.find(u => u.id === decoded.id);
     
     if (!user) {
-      return res.status(401).json({ message: 'User not found' });
+      return res.status(401).json({ 
+        success: false,
+        message: 'User not found' 
+      });
     }
     
     res.json({
@@ -455,11 +505,16 @@ app.get('/api/auth/me', (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        userType: user.role,
         avatar: user.avatar
       }
     });
   } catch (error) {
-    res.status(401).json({ message: 'Invalid token' });
+    console.error('Get current user error:', error);
+    res.status(401).json({ 
+      success: false,
+      message: 'Invalid token' 
+    });
   }
 });
 
@@ -476,10 +531,12 @@ app.get('/api/auth/google/callback',
       const token = generateToken(req.user.id);
       
       // Redirect to frontend with token
-      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/auth/google/callback?token=${token}`);
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      res.redirect(`${frontendUrl}/auth/google/callback?token=${token}`);
     } catch (error) {
       console.error('Google auth error:', error);
-      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=google_auth_failed`);
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      res.redirect(`${frontendUrl}/login?error=google_auth_failed`);
     }
   }
 );
@@ -490,14 +547,20 @@ app.post('/api/auth/google/verify', async (req, res) => {
     const { token } = req.body;
     
     if (!token) {
-      return res.status(400).json({ message: 'No token provided' });
+      return res.status(400).json({ 
+        success: false,
+        message: 'No token provided' 
+      });
     }
     
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
     const user = users.find(u => u.id === decoded.id);
     
     if (!user) {
-      return res.status(401).json({ message: 'User not found' });
+      return res.status(401).json({ 
+        success: false,
+        message: 'User not found' 
+      });
     }
     
     res.json({
@@ -508,12 +571,16 @@ app.post('/api/auth/google/verify', async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        userType: user.role,
         avatar: user.avatar
       }
     });
   } catch (error) {
     console.error('Token verification error:', error);
-    res.status(401).json({ message: 'Invalid token' });
+    res.status(401).json({ 
+      success: false,
+      message: 'Invalid token' 
+    });
   }
 });
 
@@ -560,7 +627,10 @@ app.get('/api/jobs/:id', (req, res) => {
   const job = jobs.find(j => j.id === parseInt(req.params.id));
   
   if (!job) {
-    return res.status(404).json({ message: 'Job not found' });
+    return res.status(404).json({ 
+      success: false,
+      message: 'Job not found' 
+    });
   }
   
   res.json({
@@ -574,15 +644,21 @@ app.post('/api/jobs', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
     const user = users.find(u => u.id === decoded.id);
     
-    if (!user || user.role !== 'employer') {
-      return res.status(403).json({ message: 'Only employers can post jobs' });
+    if (!user || (user.role !== 'employer' && user.role !== 'employee')) {
+      return res.status(403).json({ 
+        success: false,
+        message: 'Only employers can post jobs' 
+      });
     }
     
     const { title, company, location, type, salaryMin, salaryMax, description, requirements, responsibilities, benefits, experience, skills, openings } = req.body;
@@ -622,7 +698,11 @@ app.post('/api/jobs', (req, res) => {
     });
   } catch (error) {
     console.error('Create job error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -631,7 +711,10 @@ app.put('/api/jobs/:id', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -639,13 +722,19 @@ app.put('/api/jobs/:id', (req, res) => {
     const jobIndex = jobs.findIndex(j => j.id === parseInt(req.params.id));
     
     if (jobIndex === -1) {
-      return res.status(404).json({ message: 'Job not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Job not found' 
+      });
     }
     
     const job = jobs[jobIndex];
     
     if (job.employerId !== decoded.id) {
-      return res.status(403).json({ message: 'Not authorized to update this job' });
+      return res.status(403).json({ 
+        success: false,
+        message: 'Not authorized to update this job' 
+      });
     }
     
     jobs[jobIndex] = { ...job, ...req.body, updatedAt: new Date().toISOString() };
@@ -656,7 +745,11 @@ app.put('/api/jobs/:id', (req, res) => {
     });
   } catch (error) {
     console.error('Update job error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -665,7 +758,10 @@ app.delete('/api/jobs/:id', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -673,13 +769,19 @@ app.delete('/api/jobs/:id', (req, res) => {
     const jobIndex = jobs.findIndex(j => j.id === parseInt(req.params.id));
     
     if (jobIndex === -1) {
-      return res.status(404).json({ message: 'Job not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Job not found' 
+      });
     }
     
     const job = jobs[jobIndex];
     
     if (job.employerId !== decoded.id) {
-      return res.status(403).json({ message: 'Not authorized to delete this job' });
+      return res.status(403).json({ 
+        success: false,
+        message: 'Not authorized to delete this job' 
+      });
     }
     
     jobs.splice(jobIndex, 1);
@@ -690,7 +792,11 @@ app.delete('/api/jobs/:id', (req, res) => {
     });
   } catch (error) {
     console.error('Delete job error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -699,7 +805,10 @@ app.get('/api/jobs/employer/my-jobs', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -712,7 +821,11 @@ app.get('/api/jobs/employer/my-jobs', (req, res) => {
     });
   } catch (error) {
     console.error('Get employer jobs error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -742,7 +855,10 @@ app.get('/api/companies/:id', (req, res) => {
   const company = companies.find(c => c.id === parseInt(req.params.id));
   
   if (!company) {
-    return res.status(404).json({ message: 'Company not found' });
+    return res.status(404).json({ 
+      success: false,
+      message: 'Company not found' 
+    });
   }
   
   // Get company jobs
@@ -764,7 +880,10 @@ app.post('/api/applications', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -772,14 +891,28 @@ app.post('/api/applications', (req, res) => {
     const user = users.find(u => u.id === decoded.id);
     
     if (!user) {
-      return res.status(401).json({ message: 'User not found' });
+      return res.status(401).json({ 
+        success: false,
+        message: 'User not found' 
+      });
+    }
+    
+    // Check if user is a job seeker
+    if (user.role === 'employer' || user.role === 'employee') {
+      return res.status(403).json({ 
+        success: false,
+        message: 'Employers cannot apply for jobs' 
+      });
     }
     
     const { jobId, coverLetter } = req.body;
     const job = jobs.find(j => j.id === parseInt(jobId));
     
     if (!job) {
-      return res.status(404).json({ message: 'Job not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Job not found' 
+      });
     }
     
     // Check if already applied
@@ -788,7 +921,10 @@ app.post('/api/applications', (req, res) => {
     );
     
     if (existingApplication) {
-      return res.status(400).json({ message: 'You have already applied for this job' });
+      return res.status(400).json({ 
+        success: false,
+        message: 'You have already applied for this job' 
+      });
     }
     
     const application = {
@@ -824,7 +960,11 @@ app.post('/api/applications', (req, res) => {
     });
   } catch (error) {
     console.error('Apply error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -833,7 +973,10 @@ app.get('/api/applications/my-applications', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -846,7 +989,11 @@ app.get('/api/applications/my-applications', (req, res) => {
     });
   } catch (error) {
     console.error('Get applications error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -855,15 +1002,21 @@ app.get('/api/applications/employer-applications', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
     const user = users.find(u => u.id === decoded.id);
     
-    if (user.role !== 'employer') {
-      return res.status(403).json({ message: 'Only employers can view this' });
+    if (user.role !== 'employer' && user.role !== 'employee') {
+      return res.status(403).json({ 
+        success: false,
+        message: 'Only employers can view this' 
+      });
     }
     
     const employerJobs = jobs.filter(j => j.employerId === user.id);
@@ -877,7 +1030,11 @@ app.get('/api/applications/employer-applications', (req, res) => {
     });
   } catch (error) {
     console.error('Get employer applications error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -886,7 +1043,10 @@ app.put('/api/applications/:id/status', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -895,13 +1055,19 @@ app.put('/api/applications/:id/status', (req, res) => {
     const application = applications.find(app => app.id === parseInt(req.params.id));
     
     if (!application) {
-      return res.status(404).json({ message: 'Application not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Application not found' 
+      });
     }
     
     const job = jobs.find(j => j.id === application.jobId);
     
     if (job.employerId !== decoded.id) {
-      return res.status(403).json({ message: 'Not authorized' });
+      return res.status(403).json({ 
+        success: false,
+        message: 'Not authorized' 
+      });
     }
     
     application.status = status;
@@ -925,7 +1091,11 @@ app.put('/api/applications/:id/status', (req, res) => {
     });
   } catch (error) {
     console.error('Update status error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -936,7 +1106,10 @@ app.put('/api/users/profile', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -944,7 +1117,10 @@ app.put('/api/users/profile', (req, res) => {
     const userIndex = users.findIndex(u => u.id === decoded.id);
     
     if (userIndex === -1) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'User not found' 
+      });
     }
     
     const { name, phone, location, title, bio, skills } = req.body;
@@ -965,7 +1141,11 @@ app.put('/api/users/profile', (req, res) => {
     });
   } catch (error) {
     console.error('Update profile error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -974,7 +1154,10 @@ app.post('/api/users/save-job', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -996,7 +1179,11 @@ app.post('/api/users/save-job', (req, res) => {
     });
   } catch (error) {
     console.error('Save job error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1005,7 +1192,10 @@ app.get('/api/users/saved-jobs', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1019,7 +1209,11 @@ app.get('/api/users/saved-jobs', (req, res) => {
     });
   } catch (error) {
     console.error('Get saved jobs error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1030,7 +1224,10 @@ app.get('/api/messages', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1060,7 +1257,11 @@ app.get('/api/messages', (req, res) => {
     });
   } catch (error) {
     console.error('Get messages error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1069,7 +1270,10 @@ app.get('/api/messages/:userId', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1092,7 +1296,11 @@ app.get('/api/messages/:userId', (req, res) => {
     });
   } catch (error) {
     console.error('Get messages error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1101,7 +1309,10 @@ app.post('/api/messages', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1137,7 +1348,11 @@ app.post('/api/messages', (req, res) => {
     });
   } catch (error) {
     console.error('Send message error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1148,7 +1363,10 @@ app.get('/api/notifications', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1161,7 +1379,11 @@ app.get('/api/notifications', (req, res) => {
     });
   } catch (error) {
     console.error('Get notifications error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1170,7 +1392,10 @@ app.put('/api/notifications/:id/read', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1178,7 +1403,10 @@ app.put('/api/notifications/:id/read', (req, res) => {
     const notification = notifications.find(n => n.id === parseInt(req.params.id) && n.userId === decoded.id);
     
     if (!notification) {
-      return res.status(404).json({ message: 'Notification not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Notification not found' 
+      });
     }
     
     notification.read = true;
@@ -1189,7 +1417,11 @@ app.put('/api/notifications/:id/read', (req, res) => {
     });
   } catch (error) {
     console.error('Mark read error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1198,7 +1430,10 @@ app.put('/api/notifications/read-all', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1215,7 +1450,11 @@ app.put('/api/notifications/read-all', (req, res) => {
     });
   } catch (error) {
     console.error('Mark all read error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1224,7 +1463,10 @@ app.delete('/api/notifications/:id', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
@@ -1232,7 +1474,10 @@ app.delete('/api/notifications/:id', (req, res) => {
     const index = notifications.findIndex(n => n.id === parseInt(req.params.id) && n.userId === decoded.id);
     
     if (index === -1) {
-      return res.status(404).json({ message: 'Notification not found' });
+      return res.status(404).json({ 
+        success: false,
+        message: 'Notification not found' 
+      });
     }
     
     notifications.splice(index, 1);
@@ -1243,7 +1488,11 @@ app.delete('/api/notifications/:id', (req, res) => {
     });
   } catch (error) {
     console.error('Delete notification error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
 });
 
@@ -1254,14 +1503,17 @@ app.get('/api/stats', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   
   if (!token) {
-    return res.status(401).json({ message: 'Not authorized' });
+    return res.status(401).json({ 
+      success: false,
+      message: 'Not authorized' 
+    });
   }
   
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
     const user = users.find(u => u.id === decoded.id);
     
-    if (user.role === 'jobseeker') {
+    if (user.role === 'job_seeker') {
       const userApplications = applications.filter(a => a.applicantId === user.id);
       const userNotifications = notifications.filter(n => n.userId === user.id && !n.read);
       
@@ -1275,7 +1527,7 @@ app.get('/api/stats', (req, res) => {
           unreadNotifications: userNotifications.length
         }
       });
-    } else if (user.role === 'employer') {
+    } else if (user.role === 'employer' || user.role === 'employee') {
       const employerJobs = jobs.filter(j => j.employerId === user.id);
       const employerApplications = applications.filter(a => 
         employerJobs.some(j => j.id === a.jobId)
@@ -1305,8 +1557,23 @@ app.get('/api/stats', (req, res) => {
     }
   } catch (error) {
     console.error('Get stats error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message 
+    });
   }
+});
+
+// ==================== HEALTH CHECK ====================
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    status: 'Server is running',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
 });
 
 // ==================== ERROR HANDLING ====================
@@ -1315,6 +1582,7 @@ app.get('/api/stats', (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Error:', err);
   res.status(500).json({ 
+    success: false,
     message: 'Something went wrong!', 
     error: err.message 
   });
@@ -1322,7 +1590,10 @@ app.use((err, req, res, next) => {
 
 // Handle 404
 app.use((req, res) => {
-  res.status(404).json({ message: `Route ${req.url} not found` });
+  res.status(404).json({ 
+    success: false,
+    message: `Route ${req.url} not found` 
+  });
 });
 
 // ==================== START SERVER ====================
@@ -1344,6 +1615,7 @@ const server = app.listen(PORT, () => {
   console.log(`  GET    /api/auth/me                 - Get current user`);
   console.log(`  GET    /api/auth/google             - Google OAuth login`);
   console.log(`  POST   /api/auth/google/verify      - Verify Google token`);
+  console.log(`  GET    /api/health                  - Health check`);
   
   console.log(`\n💼 JOBS:`);
   console.log(`  GET    /api/jobs                    - Get all jobs`);
