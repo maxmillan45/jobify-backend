@@ -25,7 +25,7 @@ app.use(session({
 
 // Configure CORS
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:5000'],
+  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:5000', 'https://jobify-woad.vercel.app'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -294,50 +294,57 @@ const generateToken = (id) => {
 };
 
 // ==================== PASSPORT GOOGLE STRATEGY ====================
-passport.use(
-  new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/api/auth/google/callback',
-    },
-    async (accessToken, refreshToken, profile, done) => {
-      try {
-        // Check if user exists
-        let user = users.find(u => u.email === profile.emails[0].value);
-        
-        if (user) {
-          // Update Google ID if not already set
-          if (!user.googleId) {
-            user.googleId = profile.id;
-            user.avatar = profile.photos[0]?.value || user.avatar;
+// Only initialize Google Strategy if credentials are provided
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  passport.use(
+    new GoogleStrategy(
+      {
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/api/auth/google/callback',
+      },
+      async (accessToken, refreshToken, profile, done) => {
+        try {
+          // Check if user exists
+          let user = users.find(u => u.email === profile.emails[0].value);
+          
+          if (user) {
+            // Update Google ID if not already set
+            if (!user.googleId) {
+              user.googleId = profile.id;
+              user.avatar = profile.photos[0]?.value || user.avatar;
+            }
+            return done(null, user);
           }
-          return done(null, user);
+          
+          // Create new user
+          const newUser = {
+            id: users.length + 1,
+            name: profile.displayName,
+            email: profile.emails[0].value,
+            googleId: profile.id,
+            avatar: profile.photos[0]?.value,
+            role: 'job_seeker',
+            userType: 'job_seeker',
+            isVerified: true,
+            createdAt: new Date(),
+            savedJobs: []
+          };
+          
+          users.push(newUser);
+          
+          return done(null, newUser);
+        } catch (error) {
+          return done(error, null);
         }
-        
-        // Create new user
-        const newUser = {
-          id: users.length + 1,
-          name: profile.displayName,
-          email: profile.emails[0].value,
-          googleId: profile.id,
-          avatar: profile.photos[0]?.value,
-          role: 'job_seeker',
-          userType: 'job_seeker',
-          isVerified: true,
-          createdAt: new Date(),
-          savedJobs: []
-        };
-        
-        users.push(newUser);
-        
-        return done(null, newUser);
-      } catch (error) {
-        return done(error, null);
       }
-    }
-  )
-);
+    )
+  );
+  console.log('Google OAuth Strategy initialized');
+} else {
+  console.warn('Google OAuth credentials missing. Google login will not work.');
+  console.warn('Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env file to enable Google login');
+}
 
 passport.serializeUser((user, done) => {
   done(null, user.id);
@@ -1602,14 +1609,14 @@ const PORT = process.env.PORT || 5000;
 
 const server = app.listen(PORT, () => {
   console.log(`\n=================================`);
-  console.log(`🚀 Jobify API Server Running`);
+  console.log(`Jobify API Server Running`);
   console.log(`=================================`);
-  console.log(`📍 URL: http://localhost:${PORT}`);
-  console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`URL: http://localhost:${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`=================================\n`);
   
   console.log(`Available endpoints:`);
-  console.log(`\n🔐 AUTH:`);
+  console.log(`\nAUTH:`);
   console.log(`  POST   /api/auth/register           - Register new user`);
   console.log(`  POST   /api/auth/login              - Login user`);
   console.log(`  GET    /api/auth/me                 - Get current user`);
@@ -1617,45 +1624,45 @@ const server = app.listen(PORT, () => {
   console.log(`  POST   /api/auth/google/verify      - Verify Google token`);
   console.log(`  GET    /api/health                  - Health check`);
   
-  console.log(`\n💼 JOBS:`);
+  console.log(`\nJOBS:`);
   console.log(`  GET    /api/jobs                    - Get all jobs`);
   console.log(`  GET    /api/jobs/:id                - Get single job`);
   console.log(`  POST   /api/jobs                    - Create job`);
   console.log(`  PUT    /api/jobs/:id                - Update job`);
   console.log(`  DELETE /api/jobs/:id                - Delete job`);
   
-  console.log(`\n🏢 COMPANIES:`);
+  console.log(`\nCOMPANIES:`);
   console.log(`  GET    /api/companies               - Get all companies`);
   console.log(`  GET    /api/companies/:id           - Get single company`);
   
-  console.log(`\n📝 APPLICATIONS:`);
+  console.log(`\nAPPLICATIONS:`);
   console.log(`  POST   /api/applications            - Apply for job`);
   console.log(`  GET    /api/applications/my-applications - Get my applications`);
   console.log(`  PUT    /api/applications/:id/status - Update application status`);
   
-  console.log(`\n👤 USERS:`);
+  console.log(`\nUSERS:`);
   console.log(`  PUT    /api/users/profile           - Update profile`);
   console.log(`  POST   /api/users/save-job          - Save job`);
   console.log(`  GET    /api/users/saved-jobs        - Get saved jobs`);
   
-  console.log(`\n💬 MESSAGES:`);
+  console.log(`\nMESSAGES:`);
   console.log(`  GET    /api/messages                - Get conversations`);
   console.log(`  GET    /api/messages/:userId        - Get messages with user`);
   console.log(`  POST   /api/messages                - Send message`);
   
-  console.log(`\n🔔 NOTIFICATIONS:`);
+  console.log(`\nNOTIFICATIONS:`);
   console.log(`  GET    /api/notifications           - Get notifications`);
   console.log(`  PUT    /api/notifications/:id/read  - Mark as read`);
   console.log(`  DELETE /api/notifications/:id       - Delete notification`);
   
-  console.log(`\n📊 STATS:`);
+  console.log(`\nSTATS:`);
   console.log(`  GET    /api/stats                   - Get dashboard stats`);
   console.log(`=================================\n`);
 });
 
 server.on('error', (error) => {
   if (error.code === 'EADDRINUSE') {
-    console.log(`\n❌ Port ${PORT} is already in use!`);
+    console.log(`\nPort ${PORT} is already in use!`);
     console.log(`Please try:\n`);
     console.log(`  1. Close other applications using port ${PORT}`);
     console.log(`  2. Or change PORT in .env file\n`);
