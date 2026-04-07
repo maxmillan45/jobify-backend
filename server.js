@@ -23,9 +23,25 @@ app.use(session({
   }
 }));
 
-// Configure CORS
+// Configure CORS - Add your production frontend URL
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'https://jobify-woad.vercel.app',
+  process.env.FRONTEND_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:5000', 'https://jobify-woad.vercel.app'],
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -294,17 +310,38 @@ const generateToken = (id) => {
 };
 
 // ==================== PASSPORT GOOGLE STRATEGY ====================
+// Get callback URL from environment or construct it
+const getGoogleCallbackUrl = () => {
+  if (process.env.GOOGLE_CALLBACK_URL) {
+    return process.env.GOOGLE_CALLBACK_URL;
+  }
+  
+  // For production on Vercel
+  if (process.env.VERCEL_URL) {
+    return `https://${process.env.VERCEL_URL}/api/auth/google/callback`;
+  }
+  
+  // For local development
+  const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+  return `${baseUrl}/api/auth/google/callback`;
+};
+
 // Only initialize Google Strategy if credentials are provided
 if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  const callbackURL = getGoogleCallbackUrl();
+  console.log('Google OAuth Callback URL:', callbackURL);
+  
   passport.use(
     new GoogleStrategy(
       {
         clientID: process.env.GOOGLE_CLIENT_ID,
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:5000/api/auth/google/callback',
+        callbackURL: callbackURL,
       },
       async (accessToken, refreshToken, profile, done) => {
         try {
+          console.log('Google profile received:', profile.emails[0].value);
+          
           // Check if user exists
           let user = users.find(u => u.email === profile.emails[0].value);
           
@@ -313,6 +350,7 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
             if (!user.googleId) {
               user.googleId = profile.id;
               user.avatar = profile.photos[0]?.value || user.avatar;
+              console.log('Updated existing user with Google ID');
             }
             return done(null, user);
           }
@@ -332,18 +370,20 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
           };
           
           users.push(newUser);
+          console.log('Created new Google user:', newUser.email);
           
           return done(null, newUser);
         } catch (error) {
+          console.error('Google Strategy Error:', error);
           return done(error, null);
         }
       }
     )
   );
-  console.log('Google OAuth Strategy initialized');
+  console.log('✓ Google OAuth Strategy initialized');
 } else {
-  console.warn('Google OAuth credentials missing. Google login will not work.');
-  console.warn('Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env file to enable Google login');
+  console.warn('⚠️ Google OAuth credentials missing. Google login will not work.');
+  console.warn('Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to environment variables');
 }
 
 passport.serializeUser((user, done) => {
@@ -525,8 +565,12 @@ app.get('/api/auth/me', (req, res) => {
   }
 });
 
-// Google OAuth routes
+// Google OAuth routes - FIXED
 app.get('/api/auth/google',
+  (req, res, next) => {
+    console.log('Google auth initiated');
+    next();
+  },
   passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
@@ -534,11 +578,20 @@ app.get('/api/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/login', session: false }),
   (req, res) => {
     try {
+      console.log('Google auth callback received for user:', req.user?.email);
+      
+      if (!req.user) {
+        console.error('No user object in callback');
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+        return res.redirect(`${frontendUrl}/login?error=no_user_found`);
+      }
+      
       // Generate JWT token
       const token = generateToken(req.user.id);
       
       // Redirect to frontend with token
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      console.log('Redirecting to:', `${frontendUrl}/auth/google/callback?token=${token}`);
       res.redirect(`${frontendUrl}/auth/google/callback?token=${token}`);
     } catch (error) {
       console.error('Google auth error:', error);
@@ -1579,7 +1632,25 @@ app.get('/api/health', (req, res) => {
     success: true,
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development',
+    googleAuthConfigured: !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET)
+  });
+});
+
+// ==================== ROOT ROUTE ====================
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Jobify API',
+    version: '1.0.0',
+    status: 'running',
+    endpoints: {
+      health: '/api/health',
+      auth: '/api/auth',
+      jobs: '/api/jobs',
+      companies: '/api/companies',
+      applications: '/api/applications'
+    }
   });
 });
 
@@ -1613,6 +1684,7 @@ const server = app.listen(PORT, () => {
   console.log(`=================================`);
   console.log(`URL: http://localhost:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Google Auth: ${process.env.GOOGLE_CLIENT_ID ? '✓ Configured' : '✗ Not configured'}`);
   console.log(`=================================\n`);
   
   console.log(`Available endpoints:`);
@@ -1621,6 +1693,7 @@ const server = app.listen(PORT, () => {
   console.log(`  POST   /api/auth/login              - Login user`);
   console.log(`  GET    /api/auth/me                 - Get current user`);
   console.log(`  GET    /api/auth/google             - Google OAuth login`);
+  console.log(`  GET    /api/auth/google/callback    - Google OAuth callback`);
   console.log(`  POST   /api/auth/google/verify      - Verify Google token`);
   console.log(`  GET    /api/health                  - Health check`);
   
@@ -1662,7 +1735,7 @@ const server = app.listen(PORT, () => {
 
 server.on('error', (error) => {
   if (error.code === 'EADDRINUSE') {
-    console.log(`\nPort ${PORT} is already in use!`);
+    console.log(`\n❌ Port ${PORT} is already in use!`);
     console.log(`Please try:\n`);
     console.log(`  1. Close other applications using port ${PORT}`);
     console.log(`  2. Or change PORT in .env file\n`);
@@ -1672,3 +1745,5 @@ server.on('error', (error) => {
     process.exit(1);
   }
 });
+
+module.exports = app;
