@@ -3,25 +3,12 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const passport = require('passport');
-const session = require('express-session');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const { OAuth2Client } = require('google-auth-library');
 
 // Load env vars
 dotenv.config();
 
 const app = express();
-
-// Session middleware (required for passport)
-app.use(session({
-  secret: process.env.JWT_SECRET || 'secret123',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
-  }
-}));
 
 // Configure CORS - Add your production frontend URL
 const allowedOrigins = [
@@ -49,9 +36,8 @@ app.use(cors({
 
 app.use(express.json());
 
-// Passport middleware
-app.use(passport.initialize());
-app.use(passport.session());
+// Initialize Google OAuth Client
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // ==================== DATA STORAGE ====================
 let users = [];
@@ -309,92 +295,6 @@ const generateToken = (id) => {
   });
 };
 
-// ==================== PASSPORT GOOGLE STRATEGY ====================
-// Get callback URL from environment or construct it
-const getGoogleCallbackUrl = () => {
-  if (process.env.GOOGLE_CALLBACK_URL) {
-    return process.env.GOOGLE_CALLBACK_URL;
-  }
-  
-  // For production on Vercel
-  if (process.env.VERCEL_URL) {
-    return `https://${process.env.VERCEL_URL}/api/auth/google/callback`;
-  }
-  
-  // For local development
-  const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
-  return `${baseUrl}/api/auth/google/callback`;
-};
-
-// Only initialize Google Strategy if credentials are provided
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-  const callbackURL = getGoogleCallbackUrl();
-  console.log('Google OAuth Callback URL:', callbackURL);
-  
-  passport.use(
-    new GoogleStrategy(
-      {
-        clientID: process.env.GOOGLE_CLIENT_ID,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: callbackURL,
-      },
-      async (accessToken, refreshToken, profile, done) => {
-        try {
-          console.log('Google profile received:', profile.emails[0].value);
-          
-          // Check if user exists
-          let user = users.find(u => u.email === profile.emails[0].value);
-          
-          if (user) {
-            // Update Google ID if not already set
-            if (!user.googleId) {
-              user.googleId = profile.id;
-              user.avatar = profile.photos[0]?.value || user.avatar;
-              console.log('Updated existing user with Google ID');
-            }
-            return done(null, user);
-          }
-          
-          // Create new user
-          const newUser = {
-            id: users.length + 1,
-            name: profile.displayName,
-            email: profile.emails[0].value,
-            googleId: profile.id,
-            avatar: profile.photos[0]?.value,
-            role: 'job_seeker',
-            userType: 'job_seeker',
-            isVerified: true,
-            createdAt: new Date(),
-            savedJobs: []
-          };
-          
-          users.push(newUser);
-          console.log('Created new Google user:', newUser.email);
-          
-          return done(null, newUser);
-        } catch (error) {
-          console.error('Google Strategy Error:', error);
-          return done(error, null);
-        }
-      }
-    )
-  );
-  console.log('✓ Google OAuth Strategy initialized');
-} else {
-  console.warn('⚠️ Google OAuth credentials missing. Google login will not work.');
-  console.warn('Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to environment variables');
-}
-
-passport.serializeUser((user, done) => {
-  done(null, user.id);
-});
-
-passport.deserializeUser((id, done) => {
-  const user = users.find(u => u.id === id);
-  done(null, user);
-});
-
 // ==================== AUTH ROUTES ====================
 
 // Register
@@ -478,7 +378,7 @@ app.post('/api/auth/login', async (req, res) => {
     
     // Check if user has a password (Google OAuth users won't have one)
     if (!user.password) {
-      console.log('Google OAuth user attempting email login:', email);
+      console.log('Google user attempting email login:', email);
       return res.status(401).json({ 
         success: false,
         message: 'This account uses Google Sign-In. Please use Google to log in.' 
@@ -565,81 +465,84 @@ app.get('/api/auth/me', (req, res) => {
   }
 });
 
-// Google OAuth routes - FIXED
-app.get('/api/auth/google',
-  (req, res, next) => {
-    console.log('Google auth initiated');
-    next();
-  },
-  passport.authenticate('google', { scope: ['profile', 'email'] })
-);
-
-app.get('/api/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/login', session: false }),
-  (req, res) => {
-    try {
-      console.log('Google auth callback received for user:', req.user?.email);
-      
-      if (!req.user) {
-        console.error('No user object in callback');
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-        return res.redirect(`${frontendUrl}/login?error=no_user_found`);
-      }
-      
-      // Generate JWT token
-      const token = generateToken(req.user.id);
-      
-      // Redirect to frontend with token
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-      console.log('Redirecting to:', `${frontendUrl}/auth/google/callback?token=${token}`);
-      res.redirect(`${frontendUrl}/auth/google/callback?token=${token}`);
-    } catch (error) {
-      console.error('Google auth error:', error);
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-      res.redirect(`${frontendUrl}/login?error=google_auth_failed`);
-    }
-  }
-);
-
-// Verify Google token
-app.post('/api/auth/google/verify', async (req, res) => {
+// ==================== FIREBASE GOOGLE AUTH ====================
+// Firebase Google Sign-In endpoint
+app.post('/api/auth/google', async (req, res) => {
   try {
     const { token } = req.body;
     
     if (!token) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        message: 'No token provided' 
+        message: 'No token provided'
       });
     }
     
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
-    const user = users.find(u => u.id === decoded.id);
+    console.log('Verifying Google token...');
+    
+    // Verify the Firebase token with Google
+    const ticket = await googleClient.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+    
+    const payload = ticket.getPayload();
+    const { email, name, picture, sub: googleId } = payload;
+    
+    console.log('Google token verified for:', email);
+    
+    // Check if user exists in your in-memory users array
+    let user = users.find(u => u.email === email);
     
     if (!user) {
-      return res.status(401).json({ 
-        success: false,
-        message: 'User not found' 
-      });
+      // Create new user
+      const newUser = {
+        id: users.length + 1,
+        name: name || email.split('@')[0],
+        email: email,
+        password: null, // No password for Google users
+        googleId: googleId,
+        avatar: picture,
+        role: 'job_seeker',
+        userType: 'job_seeker',
+        isVerified: true,
+        createdAt: new Date(),
+        savedJobs: []
+      };
+      users.push(newUser);
+      user = newUser;
+      console.log('Created new Google user:', user.email, 'with ID:', user.id);
+    } else if (!user.googleId) {
+      // Link Google account to existing user
+      user.googleId = googleId;
+      if (!user.avatar && picture) {
+        user.avatar = picture;
+      }
+      console.log('Linked Google account to existing user:', user.email);
     }
+    
+    // Generate JWT token for your app
+    const jwtToken = generateToken(user.id);
+    
+    console.log('Google login successful for:', email);
     
     res.json({
       success: true,
-      token,
+      token: jwtToken,
       user: {
         id: user.id,
         name: user.name,
         email: user.email,
         role: user.role,
-        userType: user.role,
+        userType: user.userType,
         avatar: user.avatar
       }
     });
   } catch (error) {
-    console.error('Token verification error:', error);
-    res.status(401).json({ 
+    console.error('Google auth error:', error);
+    res.status(401).json({
       success: false,
-      message: 'Invalid token' 
+      message: 'Google authentication failed: ' + error.message
     });
   }
 });
@@ -1692,9 +1595,7 @@ const server = app.listen(PORT, () => {
   console.log(`  POST   /api/auth/register           - Register new user`);
   console.log(`  POST   /api/auth/login              - Login user`);
   console.log(`  GET    /api/auth/me                 - Get current user`);
-  console.log(`  GET    /api/auth/google             - Google OAuth login`);
-  console.log(`  GET    /api/auth/google/callback    - Google OAuth callback`);
-  console.log(`  POST   /api/auth/google/verify      - Verify Google token`);
+  console.log(`  POST   /api/auth/google             - Firebase Google login`);
   console.log(`  GET    /api/health                  - Health check`);
   
   console.log(`\nJOBS:`);
